@@ -4,11 +4,32 @@ using SapGateway.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.Configure<SapOptions>(builder.Configuration.GetSection(SapOptions.SectionName));
-builder.Services.AddHttpClient("sap", (sp, client) =>
+// Load .env from the project directory (gitignored, local secrets only).
+// Variables already set in the real environment take precedence.
+var envFile = Path.Combine(builder.Environment.ContentRootPath, ".env");
+if (File.Exists(envFile))
 {
-    var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<SapOptions>>().Value;
-    client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
+    foreach (var line in File.ReadAllLines(envFile))
+    {
+        var trimmed = line.Trim();
+        if (trimmed.Length == 0 || trimmed.StartsWith('#')) continue;
+        var idx = trimmed.IndexOf('=');
+        if (idx <= 0) continue;
+        var key = trimmed[..idx].Trim();
+        if (Environment.GetEnvironmentVariable(key) is null)
+            Environment.SetEnvironmentVariable(key, trimmed[(idx + 1)..].Trim());
+    }
+}
+
+var sapOptions = builder.Configuration.GetSection(SapOptions.SectionName).Get<SapOptions>() ?? new SapOptions();
+sapOptions.EnsureMockDestination();
+foreach (var destination in sapOptions.Destinations)
+    destination.ExpandEnvironmentVariables(builder.Configuration);
+
+builder.Services.AddSingleton(Microsoft.Extensions.Options.Options.Create(sapOptions));
+builder.Services.AddHttpClient("sap", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(sapOptions.TimeoutSeconds);
 });
 
 var app = builder.Build();
@@ -16,11 +37,21 @@ var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-// Built-in fake SAP system for local development (Sap:BaseUrl = "self").
+// Built-in fake SAP system for local development (destination "self").
 app.MapMockSapEndpoints();
 
-// Gateway: intercepts /sap/**, forwards to SAP, inspects + validates + transforms
-// the payload, and only then sets the HTTP status code.
+// Lists the configured SAP destinations for the UI (no secrets are exposed).
+app.MapGet("/api/destinations", () => sapOptions.Destinations.Select(d => new
+{
+    d.Name,
+    d.Description,
+    isMock = string.Equals(d.BaseUrl, "self", StringComparison.OrdinalIgnoreCase),
+    hasCredentials = d.HasCredentials,
+}));
+
+// Gateway: intercepts /sap/{destination}/**, forwards to that SAP system with its
+// basic-auth credentials, inspects + validates + transforms the payload, and only
+// then sets the HTTP status code.
 app.UseMiddleware<SapGatewayMiddleware>();
 
 app.Run();

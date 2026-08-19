@@ -1,0 +1,9 @@
+# .NET build output
+bin/
+obj/
+
+# Local secrets
+.env
+
+# OS noise
+.DS_Store

@@ -11,13 +11,36 @@ dotnet run --project src/SapGateway
 ```
 
 Open the printed URL (e.g. http://localhost:5xxx) — the built-in UI lets you
-trigger each scenario and shows the status code, messages and JSON payload.
+pick a **destination** and trigger each scenario, then shows the status code,
+messages and JSON payload.
 
-The default config (`Sap:BaseUrl = "self"`) routes to the built-in mock SAP
-endpoints under `/mock-sap/**`, so everything works without a real SAP system.
-Point `Sap:BaseUrl` in [appsettings](src/SapGateway/appsettings.json) at a real
-system to go live, e.g. `https://sap-host:44300/sap/opu/odata/sap`. Static auth /
-`x-sap-client` headers go in `Sap:DefaultHeaders`.
+## SAP destinations
+
+Destinations are named entries under `Sap:Destinations` in
+[appsettings.json](src/SapGateway/appsettings.json). Requests are routed by the
+first path segment: `/sap/{destination}/**`.
+
+```json
+"Destinations": [
+  { "Name": "self", "Description": "Built-in mock SAP system", "BaseUrl": "self" },
+  {
+    "Name": "EQ5",
+    "BaseUrl": "https://sap-eq5.example.com:44300/sap/opu/odata/sap",
+    "UserName": "${SAP_EQ5_USER}",
+    "Password": "${SAP_EQ5_PASSWORD}",
+    "DefaultHeaders": { "x-sap-client": "100" }
+  }
+]
+```
+
+- **Basic auth**: credentials are applied to the upstream call as an
+  `Authorization: Basic ...` header. The caller's `Authorization` header is never
+  forwarded to SAP.
+- **Secrets**: `${ENV_VAR}` placeholders are expanded from the process
+  environment, so no password needs to be committed. `GET /api/destinations`
+  (used by the UI) never exposes credentials.
+- The special `BaseUrl` value `"self"` routes to the built-in mock SAP endpoints
+  under `/mock-sap/**`, so everything works without a real SAP system.
 
 ## Scenarios (mock SAP)
 
@@ -32,8 +55,8 @@ system to go live, e.g. `https://sap-host:44300/sap/opu/odata/sap`. Static auth 
 ## Architecture
 
 ```
-client → /sap/** → SapGatewayMiddleware
-                     ├─ HttpClient (ResponseHeadersRead) → SAP
+client → /sap/{destination}/** → SapGatewayMiddleware
+                     ├─ HttpClient (ResponseHeadersRead, destination basic auth) → SAP
                      ├─ InspectingStream        ← scans bytes in place, zero copies
                      │     └─ XmlInspectionLog  ← SearchValues<byte> SIMD scan for
                      │                            0x00-0x1F except TAB/LF/CR
@@ -71,7 +94,8 @@ most one sibling subtree at a time.
 
 ## Layout
 
-- [Middleware/SapGatewayMiddleware.cs](src/SapGateway/Middleware/SapGatewayMiddleware.cs) — proxy + status decision
+- [Middleware/SapGatewayMiddleware.cs](src/SapGateway/Middleware/SapGatewayMiddleware.cs) — destination routing, proxy, basic auth, status decision
+- [Options/SapDestination.cs](src/SapGateway/Options/SapDestination.cs) — named destination model with env-var secret expansion
 - [Streams/InspectingStream.cs](src/SapGateway/Streams/InspectingStream.cs) — scan-as-you-read decorator
 - [Streams/XmlInspectionLog.cs](src/SapGateway/Streams/XmlInspectionLog.cs) — invalid-byte detection
 - [Services/XmlToJsonTransformer.cs](src/SapGateway/Services/XmlToJsonTransformer.cs) — streaming XML → JSON

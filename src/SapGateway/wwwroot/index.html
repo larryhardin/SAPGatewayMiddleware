@@ -51,14 +51,18 @@
 <body>
   <h1>SAP Gateway — XML Inspector</h1>
   <p class="sub">
-    Requests go to <code>/sap/{scenario}</code> → gateway middleware → SAP →
-    invalid-character inspection → XML validation → JSON transform → status code set
+    Requests go to <code>/sap/{destination}/{scenario}</code> → gateway middleware → SAP (basic auth)
+    → invalid-character inspection → XML validation → JSON transform → status code set
     <em>after</em> the payload was read.
   </p>
 
   <div class="controls">
     <div>
-      <label for="scenario">Upstream scenario</label>
+      <label for="destination">SAP destination</label>
+      <select id="destination"></select>
+    </div>
+    <div>
+      <label for="scenario">Path on that system</label>
       <select id="scenario">
         <option value="valid">valid — well-formed sales order</option>
         <option value="invalid-char">invalid-char — contains 0x0B vertical tab</option>
@@ -66,6 +70,7 @@
         <option value="error">error — SAP replies HTTP 500 with XML</option>
         <option value="large">large — ~2&nbsp;MB catalog (memory test)</option>
       </select>
+      <input id="customPath" class="hidden" type="text" placeholder="e.g. ZMY_SRV/$metadata" style="min-width:220px" />
     </div>
     <button id="send" class="primary">Send request</button>
   </div>
@@ -80,29 +85,67 @@
     <pre id="payload"></pre>
   </section>
 
-<script>
+<script type="module">
   const sendBtn = document.getElementById('send');
+  const destSelect = document.getElementById('destination');
+  const scenarioSelect = document.getElementById('scenario');
+  const customPathInput = document.getElementById('customPath');
   const resultEl = document.getElementById('result');
   const badgeEl = document.getElementById('statusBadge');
   const metaEl = document.getElementById('meta');
   const messagesEl = document.getElementById('messages');
   const payloadEl = document.getElementById('payload');
 
+  // Load the configured SAP destinations.
+  let destinations = [];
+  try {
+    destinations = await fetch('/api/destinations').then(r => r.json());
+  } catch { destinations = []; }
+
+  for (const d of destinations) {
+    const opt = document.createElement('option');
+    opt.value = d.name;
+    opt.textContent = `${d.name}${d.isMock ? ' (mock)' : ''}${d.hasCredentials ? ' 🔒' : ''}` +
+      (d.description ? ` — ${d.description}` : '');
+    destSelect.appendChild(opt);
+  }
+  if (destinations.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = 'self';
+    opt.textContent = 'self (mock)';
+    destSelect.appendChild(opt);
+  }
+
+  // Scenario list only makes sense for the mock system; for real destinations
+  // offer a free-form path input instead.
+  function updatePathControl() {
+    const d = destinations.find(x => x.name === destSelect.value);
+    const mock = !d || d.isMock;
+    scenarioSelect.classList.toggle('hidden', !mock);
+    customPathInput.classList.toggle('hidden', mock);
+  }
+  destSelect.addEventListener('change', updatePathControl);
+  updatePathControl();
+
   sendBtn.addEventListener('click', async () => {
-    const scenario = document.getElementById('scenario').value;
+    const d = destinations.find(x => x.name === destSelect.value);
+    const mock = !d || d.isMock;
+    const path = mock
+      ? scenarioSelect.value
+      : customPathInput.value.trim().replace(/^\/+/, '') || '$metadata';
     sendBtn.disabled = true;
     resultEl.classList.add('hidden');
     const started = performance.now();
 
     try {
-      const res = await fetch('/sap/' + scenario);
+      const res = await fetch(`/sap/${encodeURIComponent(destSelect.value)}/${path}`);
       const body = await res.json();
       const elapsed = (performance.now() - started).toFixed(0);
 
       badgeEl.textContent = res.status + ' ' + statusText(res.status);
       badgeEl.className = 'badge ' + (res.status < 300 ? 'ok' : res.status < 500 ? 'warn' : 'err');
       metaEl.textContent =
-        `Upstream SAP status: ${body.sapStatusCode} · ${elapsed} ms · ${body.upstream}`;
+        `Destination: ${body.destination ?? destSelect.value} · Upstream SAP status: ${body.sapStatusCode} · ${elapsed} ms · ${body.upstream}`;
 
       messagesEl.innerHTML = '';
       for (const m of body.messages ?? []) {
@@ -127,7 +170,7 @@
   });
 
   function statusText(code) {
-    const map = { 200: 'OK', 400: 'Bad Request', 404: 'Not Found', 500: 'Internal Server Error', 502: 'Bad Gateway' };
+    const map = { 200: 'OK', 400: 'Bad Request', 401: 'Unauthorized', 404: 'Not Found', 500: 'Internal Server Error', 502: 'Bad Gateway' };
     return map[code] ?? '';
   }
 </script>

@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Xml;
 using Microsoft.Extensions.Options;
@@ -55,10 +58,29 @@ public sealed class SapGatewayMiddleware
             return;
         }
 
-        string upstreamPath = remainder.Value?.TrimStart('/') ?? string.Empty;
-        Uri target = ResolveTarget(context, upstreamPath);
+        // Route shape: /sap/{destination}/** — the first segment selects the SAP system.
+        string rest = remainder.Value?.TrimStart('/') ?? string.Empty;
+        int slash = rest.IndexOf('/');
+        string destinationName = slash < 0 ? rest : rest[..slash];
+        string upstreamPath = slash < 0 ? string.Empty : rest[(slash + 1)..];
 
-        using var upstreamRequest = BuildUpstreamRequest(context, target);
+        if (string.IsNullOrEmpty(destinationName))
+        {
+            await WriteSimpleErrorAsync(context, StatusCodes.Status400BadRequest,
+                "Missing destination. Use /sap/{destination}/{path}. GET /api/destinations lists the configured systems.");
+            return;
+        }
+
+        var destination = _options.Find(destinationName);
+        if (destination is null)
+        {
+            await WriteSimpleErrorAsync(context, StatusCodes.Status404NotFound,
+                $"Unknown SAP destination '{destinationName}'. GET /api/destinations lists the configured systems.");
+            return;
+        }
+
+        Uri target = ResolveTarget(context, destination, upstreamPath);
+        using var upstreamRequest = BuildUpstreamRequest(context, destination, target);
 
         var client = _httpClientFactory.CreateClient("sap");
         using var upstreamResponse = await client.SendAsync(
@@ -115,6 +137,7 @@ public sealed class SapGatewayMiddleware
         writer.WriteStartObject();
         writer.WriteNumber("statusCode", statusCode);
         writer.WriteNumber("sapStatusCode", sapStatus);
+        writer.WriteString("destination", destination.Name);
         writer.WriteString("upstream", target.ToString());
         writer.WritePropertyName("messages");
         writer.WriteStartArray();
@@ -130,19 +153,28 @@ public sealed class SapGatewayMiddleware
         await writer.FlushAsync(context.RequestAborted);
     }
 
-    private HttpRequestMessage BuildUpstreamRequest(HttpContext context, Uri target)
+    private HttpRequestMessage BuildUpstreamRequest(HttpContext context, SapDestination destination, Uri target)
     {
         var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), target);
 
         foreach (var header in context.Request.Headers)
         {
             if (HopByHopHeaders.Contains(header.Key)) continue;
+            // The caller's credentials never leave this gateway — the destination's
+            // basic-auth credentials are applied below instead.
+            if (header.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase)) continue;
             if (header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase)) continue; // set on content below
             request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
         }
 
-        foreach (var (key, value) in _options.DefaultHeaders)
+        foreach (var (key, value) in destination.DefaultHeaders)
             request.Headers.TryAddWithoutValidation(key, value);
+
+        if (destination.HasCredentials)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue(
+                "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{destination.UserName}:{destination.Password}")));
+        }
 
         if (context.Request.ContentLength > 0 ||
             context.Request.Headers.ContainsKey("Transfer-Encoding"))
@@ -156,12 +188,23 @@ public sealed class SapGatewayMiddleware
         return request;
     }
 
-    private Uri ResolveTarget(HttpContext context, string path)
+    private Uri ResolveTarget(HttpContext context, SapDestination destination, string path)
     {
-        string baseUrl = _options.BaseUrl;
+        string baseUrl = destination.BaseUrl;
         if (string.Equals(baseUrl, "self", StringComparison.OrdinalIgnoreCase))
             baseUrl = $"{context.Request.Scheme}://{context.Request.Host}/mock-sap";
 
         return new Uri($"{baseUrl.TrimEnd('/')}/{path}{context.Request.QueryString}");
+    }
+
+    private static async Task WriteSimpleErrorAsync(HttpContext context, int statusCode, string message)
+    {
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsJsonAsync(new
+        {
+            statusCode,
+            messages = new[] { message },
+        });
     }
 }

@@ -4,16 +4,26 @@ public sealed class SapOptions
 {
     public const string SectionName = "Sap";
 
-    /// <summary>
-    /// Base URL of the SAP system, e.g. "https://sap.example.com:44300/sap/opu/odata/sap".
-    /// The special value "self" routes to this app's built-in mock SAP endpoints
-    /// (/mock-sap/**) so the demo works without a real SAP system.
-    /// </summary>
-    public string BaseUrl { get; set; } = "self";
-
-    /// <summary>Static headers added to every upstream request (auth, sap-client, ...).</summary>
-    public Dictionary<string, string> DefaultHeaders { get; set; } = new();
-
-    /// <summary>Upstream call timeout in seconds.</summary>
+    /// <summary>Gateway-wide upstream call timeout in seconds (per-destination override possible).</summary>
     public int TimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Named SAP destinations, addressable via /sap/{name}/**.
+    /// The name "self" is reserved for the built-in mock SAP system.
+    /// </summary>
+    public List<SapDestination> Destinations { get; set; } = new();
+
+    /// <summary>
+    /// Ensures the built-in mock destination exists (added last if the
+    /// configuration did not define one).
+    /// </summary>
+    public void EnsureMockDestination()
+    {
+        if (Find("self") is null)
+            Destinations.Add(new SapDestination { Name = "self", Description = "Built-in mock SAP system", BaseUrl = "self" });
+    }
+
+    /// <summary>Looks up a destination by name (case-insensitive).</summary>
+    public SapDestination? Find(string name) =>
+        Destinations.FirstOrDefault(d => string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase));
 }
