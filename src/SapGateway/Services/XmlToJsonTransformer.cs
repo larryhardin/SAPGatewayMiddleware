@@ -28,7 +28,12 @@ public static class XmlToJsonTransformer
     private static readonly XmlReaderSettings Settings = new()
     {
         Async = true,
-        DtdProcessing = DtdProcessing.Prohibit,   // XXE-safe
+        // enosix Link responses carry a DOCTYPE and reference entities declared in it
+        // (e.g. &copy;). Parse honors the internal DTD; XmlResolver = null guarantees
+        // no external DTD/entity is ever fetched — XXE stays blocked.
+        DtdProcessing = DtdProcessing.Parse,
+        XmlResolver = null,
+        MaxCharactersFromEntities = 1_000_000,
         IgnoreComments = true,
         IgnoreProcessingInstructions = true,
         IgnoreWhitespace = true,

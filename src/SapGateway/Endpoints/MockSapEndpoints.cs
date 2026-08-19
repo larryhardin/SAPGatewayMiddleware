@@ -1,4 +1,6 @@
+using System.Security;
 using System.Text;
+using System.Xml.Linq;
 
 namespace SapGateway.Endpoints;
 
@@ -64,6 +66,12 @@ public static class MockSapEndpoints
     {
         var group = app.MapGroup("/mock-sap").WithTags("Mock SAP");
 
+        // enosix Link style endpoint: /mock-sap/?sap_client=800&sap-language=EN&function=/ENSX/BUSOBJ_GET
+        // with an XML body of <PARAM><I_TYPE>...</I_TYPE><I_KEY>...</I_KEY></PARAM>.
+        // NOTE: the <RESULT> shape below is a best guess — replace it with a captured
+        // real response once one is available.
+        group.MapMethods("/", new[] { "GET", "POST" }, HandleEnosixRequestAsync);
+
         group.MapGet("/valid", (HttpContext ctx) => WriteXml(ctx, ValidXml, 200));
 
         group.MapGet("/invalid-char", (HttpContext ctx) => WriteXml(ctx, InvalidCharXml, 200));
@@ -74,6 +82,93 @@ public static class MockSapEndpoints
 
         group.MapGet("/large", (HttpContext ctx) => WriteXml(ctx, LargeXml.Value, 200));
     }
+
+    private static async Task HandleEnosixRequestAsync(HttpContext ctx)
+    {
+        var query = ctx.Request.Query;
+        string function = query["function"].ToString();
+        string sessionCmd = query["sap-sessioncmd"].ToString();
+        string client = query["sap_client"].FirstOrDefault()
+            ?? query["sap-client"].FirstOrDefault()
+            ?? "800";
+        string language = string.IsNullOrEmpty(query["sap-language"]) ? "EN" : query["sap-language"].ToString();
+
+        // SAP-style session cookies, mirroring the Insomnia capture.
+        ctx.Response.Headers.Append("Set-Cookie", $"sap-usercontext=sap-language%3D{language}; path=/");
+        ctx.Response.Headers.Append("Set-Cookie", string.Equals(sessionCmd, "cancel", StringComparison.OrdinalIgnoreCase)
+            ? $"SAP_SESSIONID_MCK_{client}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT"
+            : $"SAP_SESSIONID_MCK_{client}={Guid.NewGuid():N}%3d; path=/");
+
+        if (string.IsNullOrEmpty(function))
+        {
+            await WriteXml(ctx, EnosixErrorXml("Missing 'function' query parameter."), 400);
+            return;
+        }
+
+        if (function.Equals("/ENSX/BUSOBJ_GET", StringComparison.OrdinalIgnoreCase))
+        {
+            var (type, key, error) = await ReadBusObjParamsAsync(ctx);
+            if (error is not null)
+            {
+                await WriteXml(ctx, EnosixErrorXml(error), 400);
+                return;
+            }
+            if (!string.Equals(type, "EnosixSalesDocument", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteXml(ctx, EnosixErrorXml($"Unsupported business object '{type}'."), 400);
+                return;
+            }
+            await WriteXml(ctx, SalesDocumentResultXml(key!), 200);
+            return;
+        }
+
+        await WriteXml(ctx, EnosixErrorXml($"Unknown function '{function}'."), 400);
+    }
+
+    /// <summary>Reads I_TYPE / I_KEY out of the PARAM request body.</summary>
+    private static async Task<(string? Type, string? Key, string? Error)> ReadBusObjParamsAsync(HttpContext ctx)
+    {
+        string body;
+        using (var sr = new StreamReader(ctx.Request.Body))
+            body = await sr.ReadToEndAsync(ctx.RequestAborted);
+
+        const string shapeError = "Request body must be <PARAM><I_TYPE>...</I_TYPE><I_KEY>...</I_KEY></PARAM>.";
+        if (string.IsNullOrWhiteSpace(body))
+            return (null, null, shapeError);
+
+        try
+        {
+            var param = XElement.Parse(body);
+            string? type = param.Element("I_TYPE")?.Value;
+            string? key = param.Element("I_KEY")?.Value;
+            if (type is null || key is null)
+                return (type, key, shapeError);
+            return (type, key, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, null, $"Invalid request XML: {ex.Message}");
+        }
+    }
+
+    // Captured real /ENSX/BUSOBJ_GET response for sales document 29039.
+    // The requested I_KEY is substituted for 29039 (E_KEY, VBELN, EnosixObjKey).
+    private static readonly Lazy<string> SalesDocumentTemplate = new(() =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "MockSap", "sales-document.xml")));
+
+    private static byte[] SalesDocumentResultXml(string key)
+    {
+        string xml = SalesDocumentTemplate.Value.Replace("29039", SecurityElement.Escape(key.Trim()));
+        return Utf8(xml);
+    }
+
+    private static byte[] EnosixErrorXml(string message) => Utf8($"""
+        <?xml version="1.0" encoding="utf-8"?>
+        <error>
+          <code>/ENSX/400</code>
+          <message>{SecurityElement.Escape(message)}</message>
+        </error>
+        """);
 
     private static async Task WriteXml(HttpContext ctx, byte[] xml, int statusCode)
     {

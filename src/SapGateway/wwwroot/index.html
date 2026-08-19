@@ -70,7 +70,14 @@
         <option value="error">error — SAP replies HTTP 500 with XML</option>
         <option value="large">large — ~2&nbsp;MB catalog (memory test)</option>
       </select>
-      <input id="customPath" class="hidden" type="text" placeholder="e.g. ZMY_SRV/$metadata" style="min-width:220px" />
+      <input id="customPath" class="hidden" type="text" placeholder="?sap_client=800&sap-language=EN&function=%2FENSX%2FBUSOBJ_GET" style="min-width:220px" />
+    </div>
+    <div id="bodyWrap" class="hidden" style="flex:1 1 100%">
+      <label for="requestBody">Request body (XML)</label>
+      <textarea id="requestBody" rows="5" style="width:100%;font-family:monospace;padding:.5rem;border-radius:8px;border:1px solid color-mix(in srgb, CanvasText 25%, transparent);background:Canvas;color:CanvasText"><PARAM>
+  <I_TYPE>EnosixSalesDocument</I_TYPE>
+  <I_KEY>29039</I_KEY>
+</PARAM></textarea>
     </div>
     <button id="send" class="primary">Send request</button>
   </div>
@@ -90,6 +97,8 @@
   const destSelect = document.getElementById('destination');
   const scenarioSelect = document.getElementById('scenario');
   const customPathInput = document.getElementById('customPath');
+  const bodyWrap = document.getElementById('bodyWrap');
+  const requestBodyEl = document.getElementById('requestBody');
   const resultEl = document.getElementById('result');
   const badgeEl = document.getElementById('statusBadge');
   const metaEl = document.getElementById('meta');
@@ -123,6 +132,7 @@
     const mock = !d || d.isMock;
     scenarioSelect.classList.toggle('hidden', !mock);
     customPathInput.classList.toggle('hidden', mock);
+    bodyWrap.classList.toggle('hidden', mock);
   }
   destSelect.addEventListener('change', updatePathControl);
   updatePathControl();
@@ -132,29 +142,34 @@
     const mock = !d || d.isMock;
     const path = mock
       ? scenarioSelect.value
-      : customPathInput.value.trim().replace(/^\/+/, '') || '$metadata';
+      : customPathInput.value.trim().replace(/^\/+/, '');
     sendBtn.disabled = true;
     resultEl.classList.add('hidden');
     const started = performance.now();
 
     try {
-      const res = await fetch(`/sap/${encodeURIComponent(destSelect.value)}/${path}`);
-      const body = await res.json();
+      // Browsers forbid a body on GET, so real calls with a body go as POST;
+      // the gateway forwards the method (and body) to SAP unchanged.
+      const body = mock ? '' : requestBodyEl.value.trim();
+      const res = await fetch(`/sap/${encodeURIComponent(destSelect.value)}/${path}`, body
+        ? { method: 'POST', headers: { 'Content-Type': 'application/xml' }, body }
+        : {});
+      const json = await res.json();
       const elapsed = (performance.now() - started).toFixed(0);
 
       badgeEl.textContent = res.status + ' ' + statusText(res.status);
       badgeEl.className = 'badge ' + (res.status < 300 ? 'ok' : res.status < 500 ? 'warn' : 'err');
       metaEl.textContent =
-        `Destination: ${body.destination ?? destSelect.value} · Upstream SAP status: ${body.sapStatusCode} · ${elapsed} ms · ${body.upstream}`;
+        `Destination: ${json.destination ?? destSelect.value} · Upstream SAP status: ${json.sapStatusCode} · ${elapsed} ms · ${json.upstream}`;
 
       messagesEl.innerHTML = '';
-      for (const m of body.messages ?? []) {
+      for (const m of json.messages ?? []) {
         const li = document.createElement('li');
         li.textContent = m;
         messagesEl.appendChild(li);
       }
-      payloadEl.textContent = body.payload
-        ? JSON.stringify(body.payload, null, 2)
+      payloadEl.textContent = json.payload
+        ? JSON.stringify(json.payload, null, 2)
         : '(no payload — validation failed)';
       resultEl.classList.remove('hidden');
     } catch (err) {
