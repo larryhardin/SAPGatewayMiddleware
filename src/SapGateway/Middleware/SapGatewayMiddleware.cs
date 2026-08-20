@@ -87,17 +87,30 @@ public sealed class SapGatewayMiddleware
             return;
         }
 
-        // Buffer the outbound body so it can be logged when the upstream call
-        // fails or the response fails validation. Gateway bodies (e.g. the
-        // enosix PARAM XML) are small.
-        byte[]? outboundBody = null;
-        if (context.Request.ContentLength > 0 ||
-            context.Request.Headers.ContainsKey("Transfer-Encoding"))
-        {
-            using var buffer = new MemoryStream();
-            await context.Request.Body.CopyToAsync(buffer, context.RequestAborted);
-            outboundBody = buffer.ToArray();
-        }
+        // ------------------------------------------------------------------
+        // DEBUGGING AID (intentionally disabled — must stay ZERO copies live):
+        // Buffering the outbound body lets TrySendUpstreamAsync and the
+        // XML-validation warning log the exact bytes sent to SAP when a call
+        // fails. That proved invaluable for diagnosing the "works in curl,
+        // fails in the app" class of bugs (Expect:100-continue, forwarded
+        // browser headers, etc.), because you can compare the logged body
+        // byte-for-byte against a known-good request.
+        //
+        // The cost: it materializes the client→SAP body into a MemoryStream +
+        // a byte[] copy, breaking the zero-copy streaming guarantee. Gateway
+        // bodies (e.g. the enosix PARAM XML) are tiny, but the design contract
+        // is that NOTHING is copied, so this stays commented out. Re-enable it
+        // temporarily when you need to see the outbound payload on failure.
+        //
+        // byte[]? outboundBody = null;
+        // if (context.Request.ContentLength > 0 ||
+        //     context.Request.Headers.ContainsKey("Transfer-Encoding"))
+        // {
+        //     using var buffer = new MemoryStream();
+        //     await context.Request.Body.CopyToAsync(buffer, context.RequestAborted);
+        //     outboundBody = buffer.ToArray();
+        // }
+        byte[]? outboundBody = null; // always null while streaming (see above)
 
         Uri target = ResolveTarget(context, destination, upstreamPath);
         using var upstreamRequest = BuildUpstreamRequest(context, destination, target, outboundBody);
@@ -232,10 +245,13 @@ public sealed class SapGatewayMiddleware
                 "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{destination.UserName}:{destination.Password}")));
         }
 
-        if (body is not null)
+        // Streamed through — the request body is never buffered or copied.
+        // (When the debugging aid above is re-enabled, pass the buffered bytes
+        // here instead: request.Content = new ByteArrayContent(body).)
+        if (context.Request.ContentLength > 0 ||
+            context.Request.Headers.ContainsKey("Transfer-Encoding"))
         {
-            // Buffered above so it can be logged when the upstream call fails.
-            request.Content = new ByteArrayContent(body);
+            request.Content = new StreamContent(context.Request.Body);
             if (context.Request.ContentType is { } contentType)
                 request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
         }

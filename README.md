@@ -106,11 +106,32 @@ it**. When debugging "curl returns 200 but the gateway gets a 400/502", remember
 - **Browser-only headers** (`Origin`, `Referer`, `User-Agent`, `traceparent`,
   `Cookie`) are never forwarded upstream — see `HopByHopHeaders` in
   [SapGatewayMiddleware.cs](src/SapGateway/Middleware/SapGatewayMiddleware.cs).
-- On failure the middleware logs the **exact target URL and outbound body**
-  (`TrySendUpstreamAsync` / the XML-validation warning), so compare those against
-  a working curl command first. If the logged bytes replay cleanly with curl but
+- On failure the middleware logs the **exact target URL** (and the outbound body,
+  when the debugging aid below is enabled). Compare the logged URL/body against a
+  working curl command first. If the logged bytes replay cleanly with curl but
   fail through the gateway, the difference is in transmission behavior (above),
   not in content.
+
+### Debugging aid: logging the outbound body
+
+Live, the outbound request body is **streamed with zero copies**
+(`StreamContent` straight onto the wire). That means a failed call cannot log
+what was sent — the bytes are gone. To debug a "what did we actually send?"
+question, temporarily re-enable the buffered copy in
+[SapGatewayMiddleware.cs](src/SapGateway/Middleware/SapGatewayMiddleware.cs):
+
+1. In `InvokeAsync`, uncomment the block under `DEBUGGING AID` that buffers
+   `context.Request.Body` into `outboundBody` (a `MemoryStream` + `byte[]`).
+2. In `BuildUpstreamRequest`, replace the `StreamContent` assignment with
+   `request.Content = new ByteArrayContent(body)` (there is a comment at the spot).
+
+With that enabled, `TrySendUpstreamAsync` (connection failure) and the
+XML-validation warning both log the **exact outbound bytes**, which you can diff
+against a known-good request. This is how the `Expect: 100-continue` and
+forwarded-browser-header bugs above were found.
+
+**Re-disable it when done** — the copy breaks the zero-copy guarantee. It exists
+purely as a temporary diagnostic, not for production.
 
 ## JSON mapping conventions
 
