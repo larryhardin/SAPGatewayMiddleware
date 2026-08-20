@@ -30,7 +30,16 @@ builder.Services.AddSingleton(Microsoft.Extensions.Options.Options.Create(sapOpt
 builder.Services.AddHttpClient("sap", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(sapOptions.TimeoutSeconds);
+}).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    // Safety net: if an upstream still responds compressed, decompress before
+    // the XML inspection/validation pipeline sees the bytes.
+    AutomaticDecompression = System.Net.DecompressionMethods.All,
 });
+// SAP ICM answers the "Expect: 100-continue" handshake with a 400 HTML page
+// before the body is read; curl does not send it, HttpClient does.
+builder.Services.AddHttpClient("sap").ConfigureHttpClient(
+    c => c.DefaultRequestHeaders.ExpectContinue = false);
 
 var app = builder.Build();
 

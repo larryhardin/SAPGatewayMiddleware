@@ -10,24 +10,8 @@ namespace SapGateway.Endpoints;
 /// </summary>
 public static class MockSapEndpoints
 {
-    private static readonly byte[] ValidXml = Utf8("""
-        <?xml version="1.0" encoding="utf-8"?>
-        <order id="500123" currency="USD">
-          <customer>Acme GmbH</customer>
-          <items>
-            <item sku="A-1" qty="2">Widget</item>
-            <item sku="B-7" qty="1">Gadget</item>
-            <item sku="C-9" qty="5">Sprocket</item>
-          </items>
-          <delivery express="true">
-            <address>
-              <street>Hauptstrasse 12</street>
-              <city>Walldorf</city>
-            </address>
-          </delivery>
-          <note>Deliver before Friday</note>
-        </order>
-        """);
+    // The "valid" scenario serves the captured real /ENSX/BUSOBJ_GET response
+    // (MockSap/sales-document.xml) via SalesDocumentResultXml below.
 
     // '\v' = 0x0B vertical tab — a classic SAP interface payload offender.
     private static readonly byte[] InvalidCharXml = Utf8(
@@ -72,7 +56,8 @@ public static class MockSapEndpoints
         // real response once one is available.
         group.MapMethods("/", new[] { "GET", "POST" }, HandleEnosixRequestAsync);
 
-        group.MapGet("/valid", (HttpContext ctx) => WriteXml(ctx, ValidXml, 200));
+        // Well-formed payload shaped like a real sales document response.
+        group.MapGet("/valid", (HttpContext ctx) => WriteXml(ctx, SalesDocumentResultXml("29039"), 200));
 
         group.MapGet("/invalid-char", (HttpContext ctx) => WriteXml(ctx, InvalidCharXml, 200));
 

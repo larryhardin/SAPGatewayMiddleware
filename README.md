@@ -46,7 +46,7 @@ first path segment: `/sap/{destination}/**`.
 
 | UI selection   | Upstream behavior                                  | Gateway result |
 | -------------- | -------------------------------------------------- | -------------- |
-| `valid`        | Well-formed sales order XML                        | 200 + JSON payload |
+| `valid`        | Captured sales document response (sales-document.xml) | 200 + JSON payload |
 | `invalid-char` | XML containing `0x0B` (vertical tab) in text nodes | 502 + exact byte offsets of every violation |
 | `malformed`    | Unclosed tags                                      | 502 + XmlException line/position |
 | `error`        | SAP replies HTTP 500 with an XML error body        | 500 passed through, body validated + transformed |
@@ -84,6 +84,33 @@ Because the status code must be decided after the payload is read, the transform
 JSON is materialized **once** (pooled buffer). The raw XML is never fully
 materialized — it is inspected and consumed as a stream. Sibling arrays buffer at
 most one sibling subtree at a time.
+
+## Upstream HTTP behavior ("works in curl, fails in the app")
+
+The gateway proved that a request whose *content* is correct can still fail
+against a real SAP ICM dispatcher purely because of **how `HttpClient` transmits
+it**. When debugging "curl returns 200 but the gateway gets a 400/502", remember:
+
+- **`Expect: 100-continue`** — .NET's `SocketsHttpHandler` sends this handshake on
+  POST/PUT requests with a body; curl does not. SAP's ICM rejects it with a
+  **400 HTML error page before the body is ever read**, so the gateway surfaces it
+  as an XML-validation failure (`The 'hr' start tag ... does not match the end tag
+  of 'body'`). The `sap` HttpClient therefore sets
+  `DefaultRequestHeaders.ExpectContinue = false` in
+  [Program.cs](src/SapGateway/Program.cs).
+- **`Accept-Encoding`** — browsers always send `Accept-Encoding: gzip, deflate`;
+  curl does not. If forwarded, SAP returns a **gzip-compressed** body and the XML
+  reader chokes on the gzip magic byte (`hexadecimal value 0x1F, is an invalid
+  character. Line 1, position 1`). The middleware blocklists `Accept-Encoding` and
+  the named client enables `AutomaticDecompression` as a safety net.
+- **Browser-only headers** (`Origin`, `Referer`, `User-Agent`, `traceparent`,
+  `Cookie`) are never forwarded upstream — see `HopByHopHeaders` in
+  [SapGatewayMiddleware.cs](src/SapGateway/Middleware/SapGatewayMiddleware.cs).
+- On failure the middleware logs the **exact target URL and outbound body**
+  (`TrySendUpstreamAsync` / the XML-validation warning), so compare those against
+  a working curl command first. If the logged bytes replay cleanly with curl but
+  fail through the gateway, the difference is in transmission behavior (above),
+  not in content.
 
 ## JSON mapping conventions
 

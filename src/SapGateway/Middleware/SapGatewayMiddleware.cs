@@ -36,6 +36,11 @@ public sealed class SapGatewayMiddleware
     {
         "Host", "Connection", "Transfer-Encoding", "Keep-Alive",
         "Proxy-Authenticate", "Proxy-Authorization", "TE", "Trailer", "Upgrade",
+        // Never forward the caller's Accept-Encoding: the pipeline expects raw XML
+        // bytes. If SAP compresses anyway, the named client auto-decompresses.
+        "Accept-Encoding",
+        // Browser-only headers must not leak into the upstream SAP request.
+        "Origin", "Referer", "User-Agent", "traceparent", "Cookie",
     };
 
     public SapGatewayMiddleware(
@@ -64,6 +69,9 @@ public sealed class SapGatewayMiddleware
         string destinationName = slash < 0 ? rest : rest[..slash];
         string upstreamPath = slash < 0 ? string.Empty : rest[(slash + 1)..];
 
+        _logger.LogInformation("Inbound {Method} {Path}{QueryString}",
+            context.Request.Method, context.Request.Path, context.Request.QueryString);
+
         if (string.IsNullOrEmpty(destinationName))
         {
             await WriteSimpleErrorAsync(context, StatusCodes.Status400BadRequest,
@@ -79,12 +87,25 @@ public sealed class SapGatewayMiddleware
             return;
         }
 
+        // Buffer the outbound body so it can be logged when the upstream call
+        // fails or the response fails validation. Gateway bodies (e.g. the
+        // enosix PARAM XML) are small.
+        byte[]? outboundBody = null;
+        if (context.Request.ContentLength > 0 ||
+            context.Request.Headers.ContainsKey("Transfer-Encoding"))
+        {
+            using var buffer = new MemoryStream();
+            await context.Request.Body.CopyToAsync(buffer, context.RequestAborted);
+            outboundBody = buffer.ToArray();
+        }
+
         Uri target = ResolveTarget(context, destination, upstreamPath);
-        using var upstreamRequest = BuildUpstreamRequest(context, destination, target);
+        using var upstreamRequest = BuildUpstreamRequest(context, destination, target, outboundBody);
 
         var client = _httpClientFactory.CreateClient("sap");
-        using var upstreamResponse = await client.SendAsync(
-            upstreamRequest, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+        using var upstreamResponse = await TrySendUpstreamAsync(client, upstreamRequest, target, outboundBody, context);
+        if (upstreamResponse is null)
+            return; // 502 already written; URL + outbound body were logged.
 
         var inspection = new XmlInspectionLog();
         using var jsonBuffer = new PooledBufferWriter(initialCapacity: 16 * 1024);
@@ -102,7 +123,9 @@ public sealed class SapGatewayMiddleware
             catch (XmlException ex)
             {
                 validationError = $"XML validation failed at line {ex.LineNumber}, position {ex.LinePosition}: {ex.Message}";
-                _logger.LogWarning("Invalid XML from {Target}: {Error}", target, validationError);
+                _logger.LogWarning(
+                    "Invalid XML from {Target}: {Error}. Outbound body: {OutboundBody}",
+                    target, validationError, FormatOutboundBody(outboundBody));
             }
         }
 
@@ -153,7 +176,40 @@ public sealed class SapGatewayMiddleware
         await writer.FlushAsync(context.RequestAborted);
     }
 
-    private HttpRequestMessage BuildUpstreamRequest(HttpContext context, SapDestination destination, Uri target)
+    /// <summary>
+    /// Sends the upstream request. On failure (connection refused, DNS, timeout,
+    /// …) logs the target URL and the outbound body, writes a 502 to the client
+    /// and returns null.
+    /// </summary>
+    private async Task<HttpResponseMessage?> TrySendUpstreamAsync(
+        HttpClient client, HttpRequestMessage request, Uri target, byte[]? outboundBody, HttpContext context)
+    {
+        try
+        {
+            return await client.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
+        }
+        catch (Exception ex) when (!context.RequestAborted.IsCancellationRequested &&
+                                   ex is HttpRequestException or OperationCanceledException)
+        {
+            _logger.LogError(ex,
+                "Upstream call to {Target} failed: {Message}. Outbound body: {OutboundBody}",
+                target, ex.Message, FormatOutboundBody(outboundBody));
+            await WriteSimpleErrorAsync(context, StatusCodes.Status502BadGateway,
+                $"Upstream call to '{target}' failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static string FormatOutboundBody(byte[]? body)
+    {
+        if (body is not { Length: > 0 }) return "(none)";
+        string text = Encoding.UTF8.GetString(body);
+        const int max = 4096;
+        return text.Length <= max ? text : text[..max] + "\u2026";
+    }
+
+    private HttpRequestMessage BuildUpstreamRequest(HttpContext context, SapDestination destination, Uri target, byte[]? body)
     {
         var request = new HttpRequestMessage(new HttpMethod(context.Request.Method), target);
 
@@ -176,11 +232,10 @@ public sealed class SapGatewayMiddleware
                 "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{destination.UserName}:{destination.Password}")));
         }
 
-        if (context.Request.ContentLength > 0 ||
-            context.Request.Headers.ContainsKey("Transfer-Encoding"))
+        if (body is not null)
         {
-            // Streamed through — the request body is never buffered either.
-            request.Content = new StreamContent(context.Request.Body);
+            // Buffered above so it can be logged when the upstream call fails.
+            request.Content = new ByteArrayContent(body);
             if (context.Request.ContentType is { } contentType)
                 request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
         }

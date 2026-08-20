@@ -64,13 +64,13 @@
     <div>
       <label for="scenario">Path on that system</label>
       <select id="scenario">
-        <option value="valid">valid — well-formed sales order</option>
+        <option value="valid">valid — sales document (captured response)</option>
         <option value="invalid-char">invalid-char — contains 0x0B vertical tab</option>
         <option value="malformed">malformed — unclosed tags</option>
         <option value="error">error — SAP replies HTTP 500 with XML</option>
         <option value="large">large — ~2&nbsp;MB catalog (memory test)</option>
       </select>
-      <input id="customPath" class="hidden" type="text" placeholder="?sap_client=800&sap-language=EN&function=%2FENSX%2FBUSOBJ_GET" style="min-width:220px" />
+      <input id="customPath" class="hidden" type="text" value="?sap_client=800&sap-language=EN&function=/ENSX/BUSOBJ_GET" style="min-width:340px" />
     </div>
     <div id="bodyWrap" class="hidden" style="flex:1 1 100%">
       <label for="requestBody">Request body (XML)</label>
