@@ -114,7 +114,7 @@ it**. When debugging "curl returns 200 but the gateway gets a 400/502", remember
 
 ### Debugging aid: logging the outbound body
 
-Live, the outbound request body is **streamed with zero copies**
+Live, the outbound request body is **the middleware does not buffer the request body' / 'no buffering in the gateway layer**
 (`StreamContent` straight onto the wire). That means a failed call cannot log
 what was sent — the bytes are gone. To debug a "what did we actually send?"
 question, temporarily re-enable the buffered copy in
