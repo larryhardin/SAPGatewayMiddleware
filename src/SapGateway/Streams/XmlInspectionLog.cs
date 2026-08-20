@@ -51,5 +51,67 @@ public sealed class XmlInspectionLog
             }
             searched = pos + 1;
         }
+
+        ScanForFoobar(data);
+    }
+
+    // ------------------------------------------------------------------
+    // Substring scan test: find "Foobar" as 6 consecutive bytes.
+    // Reads arrive in chunks, so a match can span the boundary between two
+    // Scan calls. To catch those without ever buffering the payload, we carry
+    // over only the last (pattern length - 1) = 5 bytes of the previous chunk.
+    // ------------------------------------------------------------------
+    private static ReadOnlySpan<byte> Foobar => "Foobar"u8;
+    private const int FoobarCarryover = 5; // Foobar.Length - 1
+    private readonly byte[] _foobarTail = new byte[FoobarCarryover];
+    private int _foobarTailLength;
+
+    private const string FoobarBlock = "**********\n**Foobar**\n**********";
+
+    public long FoobarCount { get; private set; }
+
+    private void ScanForFoobar(ReadOnlySpan<byte> data)
+    {
+        // 1. Matches fully inside this chunk (vectorized IndexOf).
+        int searched = 0;
+        int idx;
+        while ((idx = data[searched..].IndexOf(Foobar)) >= 0)
+        {
+            FoobarCount++;
+            Messages.Add(FoobarBlock);
+            searched += idx + Foobar.Length;
+        }
+
+        // 2. Matches crossing from the previous chunk's tail into this chunk.
+        //    k = number of match bytes coming from the current chunk (1..5).
+        for (int k = 1; k < Foobar.Length && k <= data.Length; k++)
+        {
+            int fromTail = Foobar.Length - k;
+            if (_foobarTailLength >= fromTail &&
+                _foobarTail.AsSpan(_foobarTailLength - fromTail).SequenceEqual(Foobar[..fromTail]) &&
+                data[..k].SequenceEqual(Foobar[fromTail..]))
+            {
+                FoobarCount++;
+                Messages.Add(FoobarBlock);
+            }
+        }
+
+        // 3. Save this chunk's tail for the next call (5 bytes, not the payload).
+        if (data.Length >= FoobarCarryover)
+        {
+            data[^FoobarCarryover..].CopyTo(_foobarTail);
+            _foobarTailLength = FoobarCarryover;
+        }
+        else
+        {
+            int drop = _foobarTailLength + data.Length - FoobarCarryover;
+            if (drop > 0)
+            {
+                _foobarTail.AsSpan(drop, _foobarTailLength - drop).CopyTo(_foobarTail);
+                _foobarTailLength -= drop;
+            }
+            data.CopyTo(_foobarTail.AsSpan(_foobarTailLength));
+            _foobarTailLength += data.Length;
+        }
     }
 }

@@ -37,7 +37,7 @@
   .badge.err  { background: #bb0000; }
   .meta { font-size: .85rem; opacity: .75; margin-top: .4rem; }
   ul.messages { padding-left: 1.2rem; }
-  ul.messages li { margin-block: .25rem; }
+  ul.messages li { margin-block: .25rem; white-space: pre-wrap; font-family: monospace; }
   pre {
     background: color-mix(in srgb, CanvasText 6%, transparent);
     padding: 1rem; border-radius: 8px; overflow: auto; max-height: 480px;
@@ -68,6 +68,7 @@
         <option value="invalid-char">invalid-char — contains 0x0B vertical tab</option>
         <option value="malformed">malformed — unclosed tags</option>
         <option value="error">error — SAP replies HTTP 500 with XML</option>
+        <option value="foobar">foobar — substring scan test</option>
         <option value="large">large — ~2&nbsp;MB catalog (memory test)</option>
       </select>
       <input id="customPath" class="hidden" type="text" value="?sap_client=800&sap-language=EN&function=/ENSX/BUSOBJ_GET" style="min-width:340px" />

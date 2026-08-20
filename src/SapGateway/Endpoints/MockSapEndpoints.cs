@@ -36,6 +36,16 @@ public static class MockSapEndpoints
         </error>
         """);
 
+    // Well-formed payload containing the substring "Foobar" — exercises the
+    // XmlInspectionLog substring scan test.
+    private static readonly byte[] FoobarXml = Utf8("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <test>
+          <note>This payload contains Foobar for scanner testing.</note>
+          <note>A second Foobar occurrence.</note>
+        </test>
+        """);
+
     private static readonly Lazy<byte[]> LargeXml = new(() =>
     {
         var sb = new StringBuilder(2_500_000);
@@ -64,6 +74,8 @@ public static class MockSapEndpoints
         group.MapGet("/malformed", (HttpContext ctx) => WriteXml(ctx, MalformedXml, 200));
 
         group.MapGet("/error", (HttpContext ctx) => WriteXml(ctx, ErrorXml, 500));
+
+        group.MapGet("/Foobar", (HttpContext ctx) => WriteXml(ctx, FoobarXml, 200));
 
         group.MapGet("/large", (HttpContext ctx) => WriteXml(ctx, LargeXml.Value, 200));
     }
